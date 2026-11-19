@@ -398,24 +398,40 @@ final class AppModel: ObservableObject {
         return ok
     }
 
+    /// How long to keep listening for the player's broadcast. Spotify Connect (playing on another
+    /// device) round-trips through Spotify's servers and often reports well after 0.8 s.
+    private static let playbackReportWindow: TimeInterval = 3.0
+
     /// Next/previous show immediately, then update in place with the new song if Spotify/Music reports
-    /// it. Play/pause waits up to 0.5 s for the resulting state ("Playing"/"Paused"); other players get
-    /// the neutral labels.
+    /// it. Play/pause waits up to 0.5 s for the resulting state ("Playing"/"Paused"), shows the neutral
+    /// label if none arrived, and still updates in place if a late report comes in.
     private func showMediaFeedback(_ command: MediaCommand, sentAt: Date) {
+        let after = sentAt.addingTimeInterval(-0.05)
+        let logLatency: (PlaybackObserver.Event) -> Void = { [log] event in
+            log.info("Playback report from \(event.app, privacy: .public) \(event.date.timeIntervalSince(sentAt), format: .fixed(precision: 2)) s after the command")
+        }
         guard command == .playPause else {
             IndicatorHUD.shared.show(command)
-            playback.waitForChange(after: sentAt.addingTimeInterval(-0.05), timeout: 0.8) { event in
-                if let event, let content = IndicatorHUD.Content(skip: command, event: event) {
+            playback.waitForChange(after: after, timeout: Self.playbackReportWindow) { event in
+                guard let event else { return }
+                logLatency(event)
+                if let content = IndicatorHUD.Content(skip: command, event: event) {
                     IndicatorHUD.shared.show(content)
                 }
             }
             return
         }
-        playback.waitForChange(after: sentAt.addingTimeInterval(-0.05), timeout: 0.5) { event in
+        playback.waitForChange(after: after, timeout: 0.5) { [playback] event in
             if let event {
+                logLatency(event)
                 IndicatorHUD.shared.show(IndicatorHUD.Content(event))
             } else {
                 IndicatorHUD.shared.show(.playPause)
+                playback.waitForChange(after: after, timeout: Self.playbackReportWindow - 0.5) { late in
+                    guard let late else { return }
+                    logLatency(late)
+                    IndicatorHUD.shared.show(IndicatorHUD.Content(late))
+                }
             }
         }
     }
