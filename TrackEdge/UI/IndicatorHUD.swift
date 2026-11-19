@@ -13,6 +13,9 @@ final class IndicatorHUD {
     private var panel: NSPanel?
     private var hosting: NSHostingView<IndicatorHUDView>?
     private var hideWork: DispatchWorkItem?
+    /// Bumped on every show/reset so stale fade-out completions can't hide a newer indicator.
+    private var generation = 0
+    private var isShowing = false
     private let size = NSSize(width: IndicatorHUDView.width, height: IndicatorHUDView.height)
 
     struct Content: Equatable {
@@ -85,15 +88,21 @@ final class IndicatorHUD {
             self.hosting = hosting
         }
 
-        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens.first
         guard let visible = screen?.visibleFrame else { return }
         let target = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 96)
-        let wasVisible = panel.isVisible && panel.alphaValue > 0.5
+        // Only "showing" (not fading out) counts as visible; a fade-out in flight is replaced below.
+        let wasVisible = isShowing && panel.isVisible
 
         hideWork?.cancel()
+        generation &+= 1
+        let current = generation
+        isShowing = true
         if wasVisible {
             // Repeated swipes just refresh the content in place.
             panel.setFrameOrigin(target)
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
         } else {
             panel.setFrameOrigin(NSPoint(x: target.x, y: target.y - 8))
             panel.alphaValue = 0
@@ -106,16 +115,36 @@ final class IndicatorHUD {
             }
         }
 
-        let work = DispatchWorkItem { [weak panel] in
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.25
-                panel?.animator().alphaValue = 0
-            } completionHandler: {
-                if panel?.alphaValue == 0 { panel?.orderOut(nil) }
+        let work = DispatchWorkItem { [weak self, weak panel] in
+            MainActor.assumeIsolated {
+                guard let self, self.generation == current else { return }
+                self.isShowing = false
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.25
+                    panel?.animator().alphaValue = 0
+                } completionHandler: {
+                    MainActor.assumeIsolated {
+                        // A newer show() owns the panel now; don't hide it out from under it.
+                        guard self.generation == current else { return }
+                        panel?.orderOut(nil)
+                    }
+                }
             }
         }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)
+    }
+
+    /// Drops the panel so the next `show` builds a fresh one. Called after wake, unlock and display
+    /// changes, where a long-lived borderless window can be left detached from the window server.
+    func reset() {
+        hideWork?.cancel()
+        hideWork = nil
+        generation &+= 1
+        isShowing = false
+        panel?.orderOut(nil)
+        panel = nil
+        hosting = nil
     }
 
     private func makePanel() -> NSPanel {
@@ -127,6 +156,9 @@ final class IndicatorHUD {
         panel.hasShadow = true
         panel.level = .statusBar
         panel.ignoresMouseEvents = true
+        // NSPanel defaults to hiding whenever the app deactivates (e.g. after the popover was open).
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         self.panel = panel
         return panel
