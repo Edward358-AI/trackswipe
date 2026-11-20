@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 
 /// TrackEdge's on-screen indicator, shown bottom-centre above the Dock.
@@ -16,7 +17,9 @@ final class IndicatorHUD {
     /// Bumped on every show/reset so stale fade-out completions can't hide a newer indicator.
     private var generation = 0
     private var isShowing = false
+    private var lastContent: Content?
     private let size = NSSize(width: IndicatorHUDView.width, height: IndicatorHUDView.height)
+    private let log = Logger(subsystem: AppInfo.bundleIdentifier, category: "Indicator")
 
     struct Content: Equatable {
         let symbol: String
@@ -77,6 +80,13 @@ final class IndicatorHUD {
     }
 
     func show(_ content: Content) {
+        // Despite `.canJoinAllSpaces`, a reused panel can stay pinned to the Space it was first shown on
+        // and never appear on the current one. Rebuild it if macOS reports it elsewhere.
+        if let existing = panel, existing.isVisible, !existing.isOnActiveSpace {
+            log.info("Indicator panel was not on the active Space; rebuilding it")
+            reset()
+        }
+        lastContent = content
         let view = IndicatorHUDView(content: content)
         let panel = self.panel ?? makePanel()
         if let hosting {
@@ -145,6 +155,14 @@ final class IndicatorHUD {
         panel?.orderOut(nil)
         panel = nil
         hosting = nil
+    }
+
+    /// The user switched Spaces (or a full-screen app took over): start with a fresh panel on the new
+    /// Space, carrying over an indicator that was still on screen.
+    func activeSpaceChanged() {
+        let wasShowing = isShowing ? lastContent : nil
+        reset()
+        if let wasShowing { show(wasShowing) }
     }
 
     private func makePanel() -> NSPanel {

@@ -292,6 +292,7 @@ final class AppModel: ObservableObject {
         add(NSWorkspace.sessionDidResignActiveNotification) { [weak self] in self?.suspend("session inactive") }
         add(NSWorkspace.sessionDidBecomeActiveNotification) { [weak self] in self?.resume(after: 0.5) }
         add(NSWorkspace.screensDidSleepNotification) { [weak self] in self?.engine.cancelAll() }
+        add(NSWorkspace.activeSpaceDidChangeNotification) { IndicatorHUD.shared.activeSpaceChanged() }
         // Locking the screen or display sleep never posts willSleep, so reconnect when the display returns.
         add(NSWorkspace.screensDidWakeNotification) { [weak self] in
             IndicatorHUD.shared.reset()
